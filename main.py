@@ -1,6 +1,13 @@
 """
 한강공원 주차장 월별 이용 현황 대시보드
 서울 열린데이터광장 API: TbUseMonthstatusView
+
+⚠️ 단위 참고
+API 필드명은 UTZTN_HR(시간을 암시)이지만, 원본 값과 주차대수를 비교해보면
+실제로는 '분' 단위 누적치로 판단됩니다. (예: 대당 값이 시간 기준으로는
+한 달 최대 720시간을 초과하는 등 비현실적인 값이 나옴 → 분으로 환산하면
+대당 평균 2~4시간대로 합리적인 범위가 됨) 이에 따라 이 앱은 원본 값을
+'분'으로 간주하고, 필요한 곳에서 시간 단위로 환산해 표시합니다.
 """
 
 import streamlit as st
@@ -98,10 +105,21 @@ def fetch_all_data(api_key: str) -> pd.DataFrame:
             "DSTRCT_TYPE": "지구코드",
             "PKLT_NM": "주차장명",
             "PRK_CNTOM": "주차대수",
-            "UTZTN_HR": "이용시간",
+            "UTZTN_HR": "이용시간(분)",
         }
     )
+    # 시간 단위 환산 컬럼 추가 (분 -> 시간)
+    df["이용시간(시간)"] = df["이용시간(분)"] / 60
     return df.dropna(subset=["연월"])
+
+
+def format_hm(total_minutes: float) -> str:
+    """분 단위 값을 'H시간 M분' 형태 문자열로 변환"""
+    if pd.isna(total_minutes):
+        return "-"
+    hours = int(total_minutes // 60)
+    minutes = int(round(total_minutes % 60))
+    return f"{hours:,}시간 {minutes}분"
 
 
 # -----------------------------
@@ -110,6 +128,10 @@ def fetch_all_data(api_key: str) -> pd.DataFrame:
 def main():
     st.title("🌊 한강공원 주차장 월별 이용 현황")
     st.caption("데이터 출처: 서울 열린데이터광장 · TbUseMonthstatusView (미래한강본부 공원부 공원시설과)")
+    st.caption(
+        "⚠️ 원본 API 필드명은 `UTZTN_HR`(시간을 암시)이지만, 주차대수 대비 값을 검증한 결과 "
+        "실제로는 **분 단위** 누적치로 판단되어 이 앱에서는 분을 기준으로 계산하고 있습니다."
+    )
 
     api_key = get_api_key()
 
@@ -164,12 +186,15 @@ def main():
     # -----------------------------
     # 요약 지표
     # -----------------------------
+    total_minutes = filtered["이용시간(분)"].sum()
+    total_cars = filtered["주차대수"].sum()
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("총 주차대수", f"{int(filtered['주차대수'].sum()):,} 대")
-    col2.metric("총 이용시간", f"{int(filtered['이용시간'].sum()):,} 시간")
+    col1.metric("총 주차대수", f"{int(total_cars):,} 대")
+    col2.metric("총 이용시간", f"{total_minutes / 60:,.0f} 시간")
     col3.metric("대상 주차장 수", f"{filtered['주차장명'].nunique()} 개")
-    avg_hr = filtered["이용시간"].sum() / max(filtered["주차대수"].sum(), 1)
-    col4.metric("대당 평균 이용시간", f"{avg_hr:,.1f} 시간")
+    avg_minutes_per_car = total_minutes / max(total_cars, 1)
+    col4.metric("대당 평균 이용시간", format_hm(avg_minutes_per_car))
 
     st.divider()
 
@@ -178,7 +203,7 @@ def main():
     # -----------------------------
     st.subheader("📈 월별 이용 추이")
     metric_choice = st.radio(
-        "지표 선택", ["이용시간", "주차대수"], horizontal=True, key="trend_metric"
+        "지표 선택", ["이용시간(시간)", "주차대수"], horizontal=True, key="trend_metric"
     )
 
     if selected_lots:
@@ -191,6 +216,8 @@ def main():
     else:
         trend = filtered.groupby("연월")[metric_choice].sum()
 
+    unit_label = "시간" if metric_choice == "이용시간(시간)" else "대"
+    st.caption(f"단위: {unit_label}")
     st.line_chart(trend)
 
     # -----------------------------
@@ -198,7 +225,7 @@ def main():
     # -----------------------------
     st.subheader("🏆 주차장별 이용 순위 (선택 기간 합계)")
     rank_metric = st.radio(
-        "순위 기준", ["이용시간", "주차대수"], horizontal=True, key="rank_metric"
+        "순위 기준", ["이용시간(시간)", "주차대수"], horizontal=True, key="rank_metric"
     )
     rank_df = (
         filtered.groupby("주차장명")[rank_metric]
@@ -206,14 +233,18 @@ def main():
         .sort_values(ascending=False)
         .head(15)
     )
+    rank_unit_label = "시간" if rank_metric == "이용시간(시간)" else "대"
+    st.caption(f"단위: {rank_unit_label}")
     st.bar_chart(rank_df)
 
     # -----------------------------
     # 원본 데이터 테이블 + 다운로드
     # -----------------------------
     st.subheader("📋 상세 데이터")
-    display_cols = ["연월", "지구코드", "주차장명", "주차대수", "이용시간"]
-    show_df = filtered[display_cols].sort_values("연월", ascending=False)
+    display_cols = ["연월", "지구코드", "주차장명", "주차대수", "이용시간(분)", "이용시간(시간)"]
+    show_df = filtered[display_cols].copy()
+    show_df["이용시간(시간)"] = show_df["이용시간(시간)"].round(1)
+    show_df = show_df.sort_values("연월", ascending=False)
     st.dataframe(show_df, use_container_width=True, hide_index=True)
 
     csv = show_df.to_csv(index=False).encode("utf-8-sig")
